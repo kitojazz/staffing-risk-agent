@@ -157,6 +157,15 @@ def _deliver(text: str) -> None:
         log.info("SLACK (fallback a log):\n%s", text)
 
 
+@app.get("/")
+def root():
+    return {
+        "service": "Staffing Risk Agent",
+        "trigger": "POST /run",
+        "health": "GET /health",
+    }
+
+
 @app.post("/run")
 def trigger_run():
     return run_once()
@@ -165,6 +174,7 @@ def trigger_run():
 @app.get("/health")
 def health():
     store = _store()
+    store.migrate()   # idempotente: crea las tablas si es la primera vez
     last = store.last_successful_run()
     return {"status": "ok", "last_successful_run": last}
 
