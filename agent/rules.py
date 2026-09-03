@@ -1,18 +1,18 @@
-"""Motor de reglas. Determinístico, auditable, sin modelo.
+"""Rules engine. Deterministic, auditable, no model.
 
-Definición de riesgo (fijada en el diseño):
+Risk definition (fixed in design):
 
-    Un proyecto activo tiene trabajo por delante y
-      (a) un rol sin nadie asignado, o
-      (b) la única persona que lo cubre está de licencia sin backup.
+    An active project has work ahead and
+      (a) a role with nobody assigned, or
+      (b) the only person covering the role is on leave without backup.
 
-Ventana: 14 días por defecto (>= staffing lead time de 1-3 semanas).
+Window: 14 days by default (>= staffing lead time of 1-3 weeks).
 
-Regla de datos parciales (CALM / mundo abierto):
-  - afirmaciones POSITIVAS ("X está al 130%") son seguras con datos parciales
-  - afirmaciones NEGATIVAS ("nadie cubre este rol") exigen completitud
-Si falta una fuente que alimenta una negación, el riesgo se degrada a
-incertidumbre en vez de afirmarse.
+Partial-data rule (CALM / open world):
+  - POSITIVE claims ("X is at 130%") are safe with partial data
+  - NEGATIVE claims ("nobody covers this role") require completeness
+If a source feeding a negation is missing, the risk degrades to
+uncertainty instead of being asserted.
 """
 
 import logging
@@ -28,7 +28,7 @@ ACTIVE_STATUSES = {"Active", "In Flight", "In Progress"}
 
 @dataclass
 class Evidence:
-    """Un hecho con su origen. Todo lo que el agente afirme debe tener uno."""
+    """A fact with its source. Everything the agent asserts must have one."""
 
     claim: str
     system: str
@@ -40,28 +40,28 @@ class Risk:
     project_id: str
     project_title: str
     client: str
-    kind: str                      # 'rol_vacante' | 'licencia_sin_backup'
+    kind: str                      # 'vacant_role' | 'leave_without_backup'
     headline: str
     days_until_impact: int
     hours_at_stake: float
     confidence: float
     evidence: list[Evidence] = field(default_factory=list)
-    certain: bool = True           # False => se formula como pregunta
+    certain: bool = True           # False => phrased as a question
 
     @property
     def fingerprint(self) -> str:
-        """Huella para deduplicar entre corridas. Si cambia, es un riesgo distinto."""
+        """Fingerprint to dedupe across runs. If it changes, it's a different risk."""
         return f"{self.project_id}:{self.kind}:{self.days_until_impact // 7}"
 
     @property
     def severity(self) -> float:
-        """Urgencia x magnitud x confianza. Determinístico y explicable."""
+        """Urgency x magnitude x confidence. Deterministic and explainable."""
         urgency = 1.0 / max(1, self.days_until_impact)
         return urgency * max(1.0, self.hours_at_stake) * self.confidence
 
 
 def _active_projects(projects: list[dict], today: date, window_days: int) -> list[dict]:
-    """Proyectos activos con trabajo dentro de la ventana."""
+    """Active projects with work inside the window."""
     horizon = today + timedelta(days=window_days)
     out = []
     for project in projects:
@@ -69,7 +69,7 @@ def _active_projects(projects: list[dict], today: date, window_days: int) -> lis
             continue
         start = project.get("start_date")
         if start and start > horizon:
-            continue          # todavía no arranca
+            continue          # hasn't started yet
         out.append(project)
     return out
 
@@ -80,11 +80,11 @@ def detect_vacant_lead(
     window_days: int,
     complete_sources: bool,
 ) -> list[Risk]:
-    """Regla (a): proyecto activo sin lead asignado.
+    """Rule (a): active project with no lead assigned.
 
-    En estos datos, `lead_user_id: null` es la única forma en que un
-    'rol vacante' es representable: los proyectos no declaran los roles
-    que necesitan. Eso es una limitación del modelo de datos, no del agente.
+    In this data, `lead_user_id: null` is the only way a 'vacant role' is
+    representable: projects don't declare the roles they need. That's a
+    limitation of the data model, not of the agent.
     """
     risks = []
 
@@ -100,16 +100,16 @@ def detect_vacant_lead(
                 project_id=project["id"],
                 project_title=project.get("title", project["id"]),
                 client=project.get("client_name", ""),
-                kind="rol_vacante",
-                headline=f"{project.get('title')} no tiene lead asignado",
+                kind="vacant_role",
+                headline=f"{project.get('title')} has no lead assigned",
                 days_until_impact=max(0, days),
                 hours_at_stake=float(project.get("budgeted_hours") or 0),
-                # Negación: sin datos completos no la afirmamos.
+                # Negation: without complete data we don't assert it.
                 confidence=1.0 if complete_sources else 0.6,
                 certain=complete_sources,
                 evidence=[
                     Evidence(
-                        claim="lead_user_id está vacío",
+                        claim="lead_user_id is empty",
                         system="kantata",
                         record_id=f"projects/{project['id']}",
                     )
@@ -129,18 +129,18 @@ def detect_leave_without_backup(
     window_days: int,
     complete_sources: bool,
 ) -> list[Risk]:
-    """Regla (b): la única persona en un proyecto se va de licencia."""
+    """Rule (b): the only person in a role goes on leave."""
     horizon = today + timedelta(days=window_days)
     risks = []
 
-    # Quién está asignado a cada proyecto dentro de la ventana
+    # Who is assigned to each project inside the window
     by_project: dict[str, list[dict]] = {}
     for alloc in allocations:
         if not overlaps(alloc.get("start_date"), alloc.get("end_date"), today, horizon):
             continue
         by_project.setdefault(alloc["project_id"], []).append(alloc)
 
-    # Licencias que caen en la ventana. 'Pending' cuenta: es riesgo, no certeza.
+    # Leaves within the window. 'Pending' counts: it's a risk, not a certainty.
     leaves: dict[str, list[dict]] = {}
     for leave in time_off:
         if not overlaps(leave.get("start_date"), leave.get("end_date"), today, horizon):
@@ -150,20 +150,21 @@ def detect_leave_without_backup(
     for project in _active_projects(projects, today, window_days):
         assigned = by_project.get(project["id"], [])
         if not assigned:
-            continue                      # sin nadie: lo agarra la otra regla
+            continue                      # nobody: handled by the other rule
 
-        # Agrupar por ROL, no por proyecto. Tres personas en un proyecto no son
-        # backup entre sí si hacen cosas distintas: si se va la única Technical
-        # Architect, la QA y el Engagement Manager no la reemplazan.
+        # Group by ROLE, not by project. Three people on a project are not
+        # backup for each other if they do different things: if the only
+        # Technical Architect leaves, the QA and the Engagement Manager
+        # don't replace them.
         by_role: dict[str, list[dict]] = {}
         for alloc in assigned:
             person = identities_by_kantata_id.get(alloc["user_id"])
-            role = (person.job_title if person else None) or "rol desconocido"
+            role = (person.job_title if person else None) or "unknown role"
             by_role.setdefault(role, []).append(alloc)
 
         for role, holders in by_role.items():
             if len(holders) != 1:
-                continue                  # hay más de uno en ese rol: hay backup
+                continue                  # more than one in that role: there's backup
 
             only_one = holders[0]
             user_leaves = leaves.get(only_one["user_id"], [])
@@ -181,10 +182,10 @@ def detect_leave_without_backup(
                     project_id=project["id"],
                     project_title=project.get("title", project["id"]),
                     client=project.get("client_name", ""),
-                    kind="licencia_sin_backup",
+                    kind="leave_without_backup",
                     headline=(
-                        f"{name} es la única persona en el rol {role} de "
-                        f"{project.get('title')} y estará de licencia"
+                        f"{name} is the only person in the {role} role on "
+                        f"{project.get('title')} and will be on leave"
                     ),
                     days_until_impact=days,
                     hours_at_stake=float(project.get("budgeted_hours") or 0),
@@ -192,13 +193,13 @@ def detect_leave_without_backup(
                     certain=complete_sources and not pending,
                     evidence=[
                         Evidence(
-                            claim=f"única allocation activa con rol {role} en {project['id']}",
+                            claim=f"only active allocation with role {role} on {project['id']}",
                             system="kantata",
                             record_id=f"allocations/{only_one['id']}",
                         ),
                         Evidence(
-                            claim=f"licencia {leave.get('status')} del "
-                            f"{leave.get('start_date')} al {leave.get('end_date')}",
+                            claim=f"{leave.get('status')} leave from "
+                            f"{leave.get('start_date')} to {leave.get('end_date')}",
                             system="kantata",
                             record_id=f"time_off/{leave['id']}",
                         ),

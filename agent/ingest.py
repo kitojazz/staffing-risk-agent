@@ -1,14 +1,12 @@
-"""Capa de ingesta: trae datos de los tres sistemas.
+"""Ingestion layer: pulls data from the three systems.
 
-Nunca devuelve una lista pelada. Siempre devuelve un Fetched, que dice
-si los datos están completos o no. Una lista pelada miente por omisión.
+Never returns a bare list. Always returns a Fetched, which says whether
+the data is complete or not. A bare list lies by omission.
 """
 
 import logging
-import random
 import time
 from dataclasses import dataclass, field
-from typing import Any
 
 import httpx
 
@@ -19,7 +17,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Fetched:
-    """Resultado de traer una colección. `complete` es lo importante."""
+    """Result of pulling a collection. `complete` is the important part."""
 
     name: str
     records: list[dict] = field(default_factory=list)
@@ -32,7 +30,7 @@ class Fetched:
 
 
 class Deadline:
-    """Presupuesto de tiempo compartido por toda la corrida."""
+    """Time budget shared across the whole run."""
 
     def __init__(self, seconds: int):
         self.expires_at = time.monotonic() + seconds
@@ -54,42 +52,42 @@ class ApiClient:
         self._client.close()
 
     def _sleep(self, seconds: float) -> bool:
-        """Espera, salvo que se acabe el presupuesto. Devuelve False si expiró."""
+        """Sleep, unless the budget runs out. Returns False if it expired."""
         if seconds >= self._deadline.remaining():
             return False
         time.sleep(seconds)
         return True
 
     def get(self, path: str, params: dict | None = None) -> dict:
-        """GET con reintentos. Levanta excepción si se agotan los intentos."""
+        """GET with retries. Raises if attempts are exhausted."""
         last_error: Exception | None = None
 
         for attempt in range(config.MAX_ATTEMPTS):
             if self._deadline.expired():
-                raise TimeoutError(f"presupuesto agotado antes de {path}")
+                raise TimeoutError(f"budget exhausted before {path}")
 
             try:
                 response = self._client.get(path, params=params)
             except httpx.RequestError as exc:
                 last_error = exc
                 wait = config.BACKOFF_BASE_SECONDS * (2**attempt)
-                log.warning("%s falló (%s), reintento en %.1fs", path, exc, wait)
+                log.warning("%s failed (%s), retrying in %.1fs", path, exc, wait)
                 if not self._sleep(wait):
                     break
                 continue
 
             if response.status_code == 429:
-                # El servidor nos dice cuánto esperar. Obedecemos.
+                # The server tells us how long to wait. We obey.
                 wait = float(response.headers.get("Retry-After", 1))
-                log.info("429 en %s, Retry-After=%.0fs", path, wait)
+                log.info("429 on %s, Retry-After=%.0fs", path, wait)
                 if not self._sleep(wait):
                     break
                 continue
 
             if response.status_code >= 500:
-                # Sin Retry-After: backoff exponencial propio.
+                # No Retry-After: our own exponential backoff.
                 wait = config.BACKOFF_BASE_SECONDS * (2**attempt)
-                log.warning("%s devolvió %s, reintento en %.1fs", path, response.status_code, wait)
+                log.warning("%s returned %s, retrying in %.1fs", path, response.status_code, wait)
                 if not self._sleep(wait):
                     break
                 continue
@@ -97,22 +95,22 @@ class ApiClient:
             response.raise_for_status()
             return response.json()
 
-        raise RuntimeError(f"{path}: {config.MAX_ATTEMPTS} intentos agotados ({last_error})")
+        raise RuntimeError(f"{path}: {config.MAX_ATTEMPTS} attempts exhausted ({last_error})")
 
     def fetch_collection(self, name: str, path: str, key: str) -> Fetched:
-        """Trae una colección de un endpoint no paginado."""
+        """Fetch a collection from a non-paginated endpoint."""
         try:
             payload = self.get(path)
         except Exception as exc:
-            log.error("no pude traer %s: %s", name, exc)
+            log.error("could not fetch %s: %s", name, exc)
             return Fetched(name=name, complete=False, error=str(exc))
         return Fetched(name=name, records=payload.get(key, []))
 
     def fetch_clickup_tasks(self) -> Fetched:
-        """Trae tareas de ClickUp, paginadas.
+        """Fetch ClickUp tasks, paginated.
 
-        ClickUp no devuelve un total, solo `last_page`. Si una página falla,
-        seguimos con lo que tenemos pero marcamos complete=False.
+        ClickUp returns no total, only `last_page`. If a page fails, we keep
+        what we have but mark complete=False.
         """
         records: list[dict] = []
         page = 0
@@ -123,7 +121,7 @@ class ApiClient:
             try:
                 payload = self.get("/clickup/tasks", params={"page": page})
             except Exception as exc:
-                log.error("página %s de clickup falló: %s", page, exc)
+                log.error("clickup page %s failed: %s", page, exc)
                 complete = False
                 error = str(exc)
                 break

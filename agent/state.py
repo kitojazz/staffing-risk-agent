@@ -1,20 +1,20 @@
-"""Memoria entre corridas.
+"""Memory between runs.
 
-Guarda tres cosas distintas:
+Stores three distinct things:
 
-  1. alerted_risks   — qué se avisó y cuándo (para no repetir)
-  2. resolutions     — respuestas humanas (para no volver a preguntar)
-  3. runs            — heartbeat: el silencio del agente debe significar
-                       "todo bien", no "me morí"
+  1. alerted_risks   -- what was alerted and when (to avoid repeating)
+  2. resolutions     -- human answers (to avoid re-asking)
+  3. runs            -- heartbeat: the agent's silence must mean
+                       "all good", not "I died"
 
-Sin (3) no podés distinguir un agente sano de uno caído: los dos callan.
+Without (3) you can't tell a healthy agent from a dead one: both stay silent.
 """
 
 import json
 import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 from psycopg.rows import dict_row
@@ -52,10 +52,10 @@ CREATE TABLE IF NOT EXISTS runs (
 
 @dataclass
 class AlertDecision:
-    """Qué hacer con un riesgo, comparado contra lo ya avisado."""
+    """What to do with a risk, compared against what was already alerted."""
 
     send: bool
-    reason: str        # 'nuevo' | 'cambio' | 'recordatorio' | 'silencio'
+    reason: str        # 'new' | 'changed' | 'reminder' | 'silence'
 
 
 class Store:
@@ -71,15 +71,15 @@ class Store:
         with self._conn() as conn:
             conn.execute(SCHEMA)
 
-    # --- Riesgos avisados -------------------------------------------------
+    # --- Alerted risks ----------------------------------------------------
 
     def decide(self, fingerprint: str, payload: dict) -> AlertDecision:
-        """¿Mando este riesgo o me callo?
+        """Do I send this risk or stay silent?
 
-        - no existe            -> nuevo, se manda
-        - existe y cambió      -> cambio, se manda
-        - existe, igual, viejo -> recordatorio a los REMINDER_DAYS
-        - existe, igual, nuevo -> silencio
+        - not present         -> new, send it
+        - present and changed -> changed, send it
+        - present, same, old  -> reminder after REMINDER_DAYS
+        - present, same, new  -> silence
         """
         with self._conn() as conn:
             row = conn.execute(
@@ -88,19 +88,19 @@ class Store:
             ).fetchone()
 
         if row is None:
-            return AlertDecision(send=True, reason="nuevo")
+            return AlertDecision(send=True, reason="new")
 
         if row["payload"] != payload:
-            return AlertDecision(send=True, reason="cambio")
+            return AlertDecision(send=True, reason="changed")
 
         age = datetime.now(timezone.utc) - row["last_alerted"]
         if age >= timedelta(days=config.REMINDER_DAYS):
-            return AlertDecision(send=True, reason="recordatorio")
+            return AlertDecision(send=True, reason="reminder")
 
-        return AlertDecision(send=False, reason="silencio")
+        return AlertDecision(send=False, reason="silence")
 
     def record_alert(self, fingerprint: str, project_id: str, kind: str, payload: dict) -> None:
-        """Idempotente: correr dos veces el mismo día no duplica nada."""
+        """Idempotent: running twice the same day duplicates nothing."""
         with self._conn() as conn:
             conn.execute(
                 """
@@ -113,10 +113,10 @@ class Store:
                 (fingerprint, project_id, kind, json.dumps(payload, default=str)),
             )
 
-    # --- Confirmaciones humanas -------------------------------------------
+    # --- Human confirmations ----------------------------------------------
 
     def confirmations(self) -> dict[str, str]:
-        """Respuestas vigentes. Vencen a los RESOLUTION_TTL_DAYS."""
+        """Answers still in effect. They expire after RESOLUTION_TTL_DAYS."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=config.RESOLUTION_TTL_DAYS)
         with self._conn() as conn:
             rows = conn.execute(
@@ -139,7 +139,7 @@ class Store:
             )
 
     def invalidate_confirmations(self, keys: list[str]) -> None:
-        """Los datos de esa persona/proyecto cambiaron: hay que volver a preguntar."""
+        """That person's/project's data changed: we must ask again."""
         if not keys:
             return
         with self._conn() as conn:
@@ -171,7 +171,7 @@ class Store:
 
 
 class MemoryStore(Store):
-    """Store en memoria para desarrollo y para los casos dorados. Sin Postgres."""
+    """In-memory store for development and golden cases. No Postgres."""
 
     def __init__(self):
         self._alerts: dict[str, dict] = {}
@@ -184,12 +184,12 @@ class MemoryStore(Store):
     def decide(self, fingerprint: str, payload: dict) -> AlertDecision:
         row = self._alerts.get(fingerprint)
         if row is None:
-            return AlertDecision(send=True, reason="nuevo")
+            return AlertDecision(send=True, reason="new")
         if row["payload"] != payload:
-            return AlertDecision(send=True, reason="cambio")
+            return AlertDecision(send=True, reason="changed")
         if datetime.now(timezone.utc) - row["last_alerted"] >= timedelta(days=config.REMINDER_DAYS):
-            return AlertDecision(send=True, reason="recordatorio")
-        return AlertDecision(send=False, reason="silencio")
+            return AlertDecision(send=True, reason="reminder")
+        return AlertDecision(send=False, reason="silence")
 
     def record_alert(self, fingerprint: str, project_id: str, kind: str, payload: dict) -> None:
         self._alerts[fingerprint] = {

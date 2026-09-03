@@ -1,19 +1,19 @@
-"""La capa del modelo. Usa Google Gemini via su endpoint compatible con OpenAI.
+"""The model layer. Uses Google Gemini via its OpenAI-compatible endpoint.
 
-El LLM hace dos cosas y ninguna mas:
-  1. redacta el titular y el "por que importa" de cada grupo de riesgos
-  2. desempata identidades que la cascada deterministica no resolvio
+The LLM does exactly two things and no more:
+  1. drafts the headline and the "why it matters" of each risk group
+  2. breaks ties on identities the deterministic cascade didn't resolve
 
-Nunca escribe hechos. Nombres, fechas, horas y links los pone el codigo
-desde el payload verificado. El modelo devuelve JSON con campos fijos y
-el render final es deterministico.
+It never writes facts. Names, dates, hours and links are placed by the code
+from the verified payload. The model returns JSON with fixed fields and the
+final render is deterministic.
 
-Despues de generar, validate_output chequea que no haya aparecido ninguna
-entidad que no estuviera en el payload. Si aparece, se descarta la salida
-del modelo y se cae a un template.
+After generating, validate_output checks that no entity appeared that wasn't
+in the payload. If one did, the model output is discarded and a template is
+used instead.
 
-Proveedor intercambiable: solo cambian LLM_BASE_URL, LLM_MODEL y la env var
-de la key. La logica de grounding y validacion es identica en cualquier proveedor.
+Provider is swappable: only LLM_BASE_URL, LLM_MODEL and the key env var change.
+The grounding and validation logic is identical for any provider.
 """
 
 import json
@@ -33,33 +33,33 @@ API_KEY_ENV = os.environ.get("LLM_API_KEY_ENV", "GEMINI_API_KEY")
 
 TEMPERATURE = 0.0
 
-SYSTEM_PROMPT = """Sos un asistente que redacta alertas de staffing para un delivery lead.
+SYSTEM_PROMPT = """You draft staffing alerts for a delivery lead.
 
-Reglas estrictas:
-- Usa UNICAMENTE los hechos del JSON que recibis. No agregues contexto, historia,
-  ni suposiciones sobre personas, proyectos o clientes.
-- No inventes nombres, fechas, numeros ni porcentajes.
-- Si un riesgo viene marcado como certero=false, redactalo como PREGUNTA.
-- Escribi en espanol rioplatense, tono directo y breve.
-- Responde SOLO con JSON valido, sin markdown ni backticks.
+Strict rules:
+- Use ONLY the facts in the JSON you receive. Do not add context, history,
+  or assumptions about people, projects or clients.
+- Do not invent names, dates, numbers or percentages.
+- If a risk is marked certain=false, phrase it as a QUESTION, not an assertion.
+- Write in English, direct and brief.
+- Respond with VALID JSON ONLY, no markdown, no backticks.
 
-Formato de respuesta:
+Response format:
 {
-  "titular": "una linea que resuma la situacion general",
+  "headline": "one line summarizing the overall situation",
   "items": [
-    {"id": "<el id del grupo>", "texto": "una o dos oraciones sobre por que importa"}
+    {"id": "<the group id>", "text": "one or two sentences on why it matters"}
   ]
 }"""
 
 
 class LLMUnavailable(Exception):
-    """El modelo no respondio. El agente sigue con el template deterministico."""
+    """The model did not respond. The agent continues with the deterministic template."""
 
 
 def _call(payload: dict, system: str = SYSTEM_PROMPT, timeout: float = 90.0) -> dict:
     api_key = os.environ.get(API_KEY_ENV)
     if not api_key:
-        raise LLMUnavailable(f"falta {API_KEY_ENV}")
+        raise LLMUnavailable(f"missing {API_KEY_ENV}")
 
     body = {
         "model": MODEL,
@@ -84,44 +84,51 @@ def _call(payload: dict, system: str = SYSTEM_PROMPT, timeout: float = 90.0) -> 
     try:
         text = response.json()["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as exc:
-        raise LLMUnavailable(f"respuesta inesperada: {response.text[:200]}") from exc
+        raise LLMUnavailable(f"unexpected response: {response.text[:200]}") from exc
 
     cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        raise LLMUnavailable(f"respuesta no es JSON: {text[:200]}") from exc
+        raise LLMUnavailable(f"response is not JSON: {text[:200]}") from exc
 
 
 def _entities(payload: dict) -> set:
     allowed = set()
-    for group in payload.get("grupos", []):
-        for key in ("persona", "proyecto", "cliente", "rol"):
+    for group in payload.get("groups", []):
+        for key in ("person", "project", "client", "role"):
             value = group.get(key)
             if value:
                 allowed.add(str(value).lower())
-        for project in group.get("proyectos", []):
+        for project in group.get("projects", []):
             allowed.add(str(project).lower())
     return allowed
 
 
 def validate_output(generated: dict, payload: dict) -> list:
+    """Return the list of violations. Empty = output is usable.
+
+    Checks two kinds of invention:
+      - numbers that weren't in the payload
+      - proper names that weren't in the payload
+    Connecting prose is free: it is not validated word by word.
+    """
     violations = []
     allowed = _entities(payload)
     allowed_numbers = {
         str(n)
-        for group in payload.get("grupos", [])
-        for n in (group.get("dias"), group.get("horas"), len(group.get("proyectos", [])))
+        for group in payload.get("groups", [])
+        for n in (group.get("days"), group.get("hours"), len(group.get("projects", [])))
         if n is not None
     }
-    texts = [generated.get("titular", "")] + [i.get("texto", "") for i in generated.get("items", [])]
+    texts = [generated.get("headline", "")] + [i.get("text", "") for i in generated.get("items", [])]
     for text in texts:
         for number in re.findall(r"\b\d+(?:[.,]\d+)?\b", text):
             if number not in allowed_numbers:
-                violations.append(f"numero inventado: {number}")
-        for word in re.findall(r"(?<!^)(?<![.!?]\s)\b([A-ZÁÉÍÓÚÑ][\wáéíóúñ]{2,})\b", text):
+                violations.append(f"invented number: {number}")
+        for word in re.findall(r"(?<!^)(?<![.!?]\s)\b([A-Z][\w]{2,})\b", text):
             if word.lower() not in allowed and not any(word.lower() in a for a in allowed):
-                violations.append(f"entidad no verificada: {word}")
+                violations.append(f"unverified entity: {word}")
     return violations
 
 
@@ -131,12 +138,18 @@ def compose(payload: dict):
 
 
 def disambiguate_identity(candidate: dict, options: list) -> dict:
+    """Fallback tier of the matching cascade.
+
+    With the provided data this tier does NOT fire: the 14 active users
+    resolve by exact email. It stays as a safety net for production, where
+    different domains, aliases and missing emails show up.
+    """
     payload = {
-        "tarea": "identidad",
-        "candidato": candidate,
-        "opciones": options,
-        "instruccion": 'Devolve {"match_id": <id o null>, "confianza": <0..1>, "motivo": "..."}',
+        "task": "identity",
+        "candidate": candidate,
+        "options": options,
+        "instruction": 'Return {"match_id": <id or null>, "confidence": <0..1>, "reason": "..."}',
     }
-    result = _call(payload, system="Responde solo con JSON valido, sin markdown.")
-    result["confianza"] = min(float(result.get("confianza", 0)), 0.85)
+    result = _call(payload, system="Respond with valid JSON only, no markdown.")
+    result["confidence"] = min(float(result.get("confidence", 0)), 0.85)
     return result

@@ -1,8 +1,8 @@
-"""Agrupación, priorización y renderizado del mensaje.
+"""Grouping, prioritization and message rendering.
 
-Los hechos duros (nombres, fechas, horas, links) los escribe este módulo
-desde el payload verificado. El LLM solo aporta el titular y el "por qué
-importa". Si su salida no pasa la validación, se usa el template.
+The hard facts (names, dates, hours, links) are written by this module from
+the verified payload. The LLM only contributes the headline and the "why it
+matters". If its output fails validation, the template is used instead.
 """
 
 import logging
@@ -18,8 +18,8 @@ TOP_N = 5
 
 @dataclass
 class RiskGroup:
-    """Riesgos que comparten causa. Una licencia que afecta dos proyectos
-    es un problema con dos impactos, no dos problemas."""
+    """Risks sharing a cause. A leave affecting two projects is one problem
+    with two impacts, not two problems."""
 
     key: str
     kind: str
@@ -46,7 +46,7 @@ class RiskGroup:
 
 
 def group_by_cause(risks: list[Risk]) -> list[RiskGroup]:
-    """Agrupa por (tipo, persona, rol). Los sin persona van solos por proyecto."""
+    """Group by (kind, person, role). Those without a person go alone by project."""
     groups: dict[str, RiskGroup] = {}
 
     for risk in risks:
@@ -66,30 +66,30 @@ def group_by_cause(risks: list[Risk]) -> list[RiskGroup]:
 
 
 def _person_of(risk: Risk) -> str | None:
-    if risk.kind != "licencia_sin_backup":
+    if risk.kind != "leave_without_backup":
         return None
-    return risk.headline.split(" es la única")[0].strip() or None
+    return risk.headline.split(" is the only")[0].strip() or None
 
 
 def _role_of(risk: Risk) -> str | None:
-    if " en el rol " not in risk.headline:
+    if " in the " not in risk.headline or " role on " not in risk.headline:
         return None
-    return risk.headline.split(" en el rol ")[1].split(" de ")[0].strip()
+    return risk.headline.split(" in the ")[1].split(" role on ")[0].strip()
 
 
 def build_payload(groups: list[RiskGroup]) -> dict:
-    """Lo único que ve el LLM. Chico, verificado, sin datos crudos de la API."""
+    """The only thing the LLM sees. Small, verified, no raw API data."""
     return {
-        "grupos": [
+        "groups": [
             {
                 "id": group.key,
-                "tipo": group.kind,
-                "persona": group.person,
-                "rol": group.role,
-                "proyectos": group.projects,
-                "dias": group.days,
-                "horas": round(group.hours),
-                "certero": group.certain,
+                "kind": group.kind,
+                "person": group.person,
+                "role": group.role,
+                "projects": group.projects,
+                "days": group.days,
+                "hours": round(group.hours),
+                "certain": group.certain,
             }
             for group in groups[:TOP_N]
         ]
@@ -97,23 +97,23 @@ def build_payload(groups: list[RiskGroup]) -> dict:
 
 
 def _fallback_text(group: RiskGroup) -> str:
-    """Template determinístico. Se usa si el LLM falla o inventa algo."""
+    """Deterministic template. Used if the LLM fails or invents something."""
     projects = ", ".join(group.projects)
-    if group.kind == "rol_vacante":
-        return f"{projects} no tiene lead asignado y quedan {round(group.hours)}h de budget."
-    verb = "queda" if group.certain else "podría quedar"
-    return f"{group.person} está de licencia y {projects} {verb} sin cobertura de {group.role}."
+    if group.kind == "vacant_role":
+        return f"{projects} has no lead assigned, with {round(group.hours)}h of budget left."
+    verb = "is" if group.certain else "may be"
+    return f"{group.person} is on leave and {projects} {verb} left without {group.role} coverage."
 
 
 def render(groups: list[RiskGroup], data_notes: list[str]) -> dict:
-    """Arma el mensaje final. Devuelve dict con texto y metadatos de la corrida."""
+    """Build the final message. Returns a dict with text and run metadata."""
     if not groups:
-        return {"send": False, "reason": "sin riesgos", "text": ""}
+        return {"send": False, "reason": "no risks", "text": ""}
 
     top = groups[:TOP_N]
     payload = build_payload(top)
 
-    headline = f"{len(groups)} riesgo(s) de cobertura en los próximos {config.WINDOW_DAYS} días"
+    headline = f"{len(groups)} coverage risk(s) in the next {config.WINDOW_DAYS} days"
     texts: dict[str, str] = {}
     llm_used = False
     llm_note = ""
@@ -121,14 +121,14 @@ def render(groups: list[RiskGroup], data_notes: list[str]) -> dict:
     try:
         generated, violations = llm.compose(payload)
         if violations:
-            llm_note = f"salida del modelo descartada: {'; '.join(violations[:3])}"
+            llm_note = f"model output discarded: {'; '.join(violations[:3])}"
             log.warning(llm_note)
         else:
-            headline = generated.get("titular", headline)
-            texts = {item["id"]: item["texto"] for item in generated.get("items", [])}
+            headline = generated.get("headline", headline)
+            texts = {item["id"]: item["text"] for item in generated.get("items", [])}
             llm_used = True
     except llm.LLMUnavailable as exc:
-        llm_note = f"modelo no disponible: {exc}"
+        llm_note = f"model unavailable: {exc}"
         log.warning(llm_note)
 
     lines = [f"*{headline}*", ""]
@@ -137,18 +137,18 @@ def render(groups: list[RiskGroup], data_notes: list[str]) -> dict:
         body = texts.get(group.key) or _fallback_text(group)
         marker = "•" if group.certain else "❓"
         lines.append(f"{marker} {body}")
-        # Los hechos y las fuentes los escribe el código, nunca el modelo.
+        # Facts and sources are written by the code, never by the model.
         for risk in group.risks:
             sources = ", ".join(f"{e.system}:{e.record_id}" for e in risk.evidence)
-            lines.append(f"    _{risk.project_title} — impacto en {risk.days_until_impact}d — {sources}_")
+            lines.append(f"    _{risk.project_title} — impact in {risk.days_until_impact}d — {sources}_")
         lines.append("")
 
     if len(groups) > TOP_N:
-        lines.append(f"_y {len(groups) - TOP_N} más, ordenados por severidad._")
+        lines.append(f"_and {len(groups) - TOP_N} more, ordered by severity._")
 
     if data_notes:
         lines.append("")
-        lines.append(f"_Datos parciales: {'; '.join(data_notes)}_")
+        lines.append(f"_Partial data: {'; '.join(data_notes)}_")
 
     return {
         "send": True,

@@ -1,225 +1,231 @@
 # Staffing Risk Agent
 
-Agente que detecta riesgos de cobertura en proyectos de delivery cruzando Kantata,
-Salesforce y ClickUp, y los avisa en Slack.
+An agent that detects coverage risks in delivery projects by reconciling Kantata,
+Salesforce and ClickUp, and reports them to Slack.
 
 ---
 
-## Qué considera "staffing risk"
+## What counts as "staffing risk"
 
-> Un proyecto activo tiene trabajo por delante y **(a)** un rol sin nadie asignado,
-> o **(b)** la única persona que cubre ese rol está de licencia sin backup.
+> An active project has work ahead and **(a)** a role with nobody assigned,
+> or **(b)** the only person covering that role is on leave without backup.
 
-Ventana: **14 días** (configurable). El criterio es el *staffing lead time*: cubrir
-un rol lleva de 1 a 3 semanas, así que avisar con menos margen es avisar tarde.
+Window: **14 days** (configurable). The criterion is the *staffing lead time*:
+covering a role takes 1 to 3 weeks, so alerting with less margin is alerting late.
 
-Lo que el agente **no** hace: no sugiere a quién asignar. Esa decisión necesita
-contexto que no está en los datos (skills reales, relación con el cliente, planes
-de carrera). Fingir que lo sabe sería peor que callarse.
+What the agent does **not** do: it doesn't suggest who to assign. That decision
+needs context that isn't in the data (real skills, client relationship, career
+plans). Pretending it knows would be worse than staying silent.
 
 ---
 
-## Cómo correrlo
+## How to run it
 
 ### Local
 
 ```bash
-# 1. Levantar el mock API (en otra terminal)
+# 1. Start the mock API (in another terminal)
 cd eng-case-study && uvicorn app.main:app --port 8000
 
-# 2. Correr el agente una vez
+# 2. Run the agent once
 pip install -r requirements.txt
 API_BASE_URL=http://localhost:8000 python -m agent.main
 ```
 
-Sin `DATABASE_URL` usa un store en memoria. Sin `ANTHROPIC_API_KEY` cae al
-template determinístico. Sin `SLACK_WEBHOOK_URL` imprime el mensaje al log.
-Las tres degradaciones son intencionales.
+Without `DATABASE_URL` it uses an in-memory store. Without `GEMINI_API_KEY` it
+falls back to the deterministic template. Without `SLACK_WEBHOOK_URL` it prints
+the message to the log. All three degradations are intentional.
 
-### Como servicio
+### As a service
 
 ```bash
 uvicorn agent.main:app --host 0.0.0.0 --port 8000
 ```
 
-| Endpoint | Qué hace |
+| Endpoint | What it does |
 |---|---|
-| `POST /run` | Fuerza una corrida y devuelve el resumen |
-| `GET /health` | Heartbeat: timestamp de la última corrida exitosa |
+| `POST /run` | Forces a run and returns the summary |
+| `GET /health` | Heartbeat: timestamp of the last successful run |
 
-El cron y el endpoint llaman a la **misma** función (`run_once`). No hay dos
-caminos que puedan divergir.
+The cron and the endpoint call the **same** function (`run_once`). There are no
+two paths that can drift apart.
 
 ---
 
-## Variables de entorno
+## Environment variables
 
-| Variable | Default | Para qué |
+| Variable | Default | Purpose |
 |---|---|---|
-| `API_BASE_URL` | `http://localhost:8000` | Base del mock API |
-| `CANDIDATE_TOKEN` | vacío | Header `X-Candidate-Token` si el stub lo exige |
-| `DATABASE_URL` | vacío | Postgres. Sin esto, store en memoria |
-| `ANTHROPIC_API_KEY` | vacío | Sin esto, template determinístico |
-| `SLACK_WEBHOOK_URL` | vacío | Sin esto, el mensaje va al log |
-| `WINDOW_DAYS` | `14` | Ventana de análisis |
-| `MAX_ATTEMPTS` | `4` | Reintentos por request |
-| `RUN_BUDGET_SECONDS` | `120` | Tope de tiempo por corrida |
-| `REMINDER_DAYS` | `7` | Cada cuánto repetir un riesgo que sigue vivo |
-| `RESOLUTION_TTL_DAYS` | `90` | Vencimiento de las confirmaciones humanas |
-| `LLM_MODEL` | `claude-haiku-4-5-20251001` | El más barato que sirve |
+| `API_BASE_URL` | `http://localhost:8000` | Base of the mock API |
+| `CANDIDATE_TOKEN` | empty | `X-Candidate-Token` header if the stub requires it |
+| `DATABASE_URL` | empty | Postgres. Without it, in-memory store |
+| `GEMINI_API_KEY` | empty | Without it, deterministic template |
+| `LLM_MODEL` | `gemini-flash-lite-latest` | Fast; no heavy thinking |
+| `LLM_BASE_URL` | Gemini OpenAI-compat endpoint | Switch provider = change this |
+| `SLACK_WEBHOOK_URL` | empty | Without it, the message goes to the log |
+| `HEARTBEAT_URL` | empty | Dead man's switch ping target |
+| `WINDOW_DAYS` | `14` | Analysis window |
+| `MAX_ATTEMPTS` | `4` | Retries per request |
+| `RUN_BUDGET_SECONDS` | `120` | Time budget per run |
+| `REMINDER_DAYS` | `7` | How often to repeat a still-live risk |
+| `RESOLUTION_TTL_DAYS` | `90` | Expiry of human confirmations |
 
 ---
 
-## Arquitectura
+## Architecture
 
 ```
-Disparador        cron semanal + POST /run
-    ↓
-Ingesta           3 APIs · Retry-After honrado · backoff exponencial
-                  4 intentos · tope de 120s · marca completitud
-    ↓
-Normalización     escalas, fechas, nulos, huérfanos
-    ↓
-Identidad         email → nombre inequívoco → señales → LLM
-    ↓
-Reglas            determinístico, con evidencia trazable
-    ↓
-Memoria           Postgres: ¿nuevo, cambió, o ya lo avisé?
-    ↓
-Redacción         LLM con salida estructurada + validación de hechos
-    ↓
-Salida            webhook de Slack, o log
+Trigger           weekly cron + POST /run
+    v
+Ingestion         3 APIs · Retry-After honored · exponential backoff
+                  4 attempts · 120s budget · marks completeness
+    v
+Normalization     scales, dates, nulls, orphans
+    v
+Identity          email -> unambiguous name -> signals -> LLM
+    v
+Rules             deterministic, with traceable evidence
+    v
+Memory            Postgres: new, changed, or already alerted?
+    v
+Drafting          LLM with structured output + fact validation
+    v
+Output            Slack webhook, or log
 ```
 
-### Módulos
+### Modules
 
-| Archivo | Responsabilidad |
+| File | Responsibility |
 |---|---|
-| `config.py` | Todo lo ajustable, en un solo lugar |
-| `ingest.py` | HTTP con reintentos. Devuelve `Fetched`, nunca una lista pelada |
-| `normalize.py` | Limpieza de la basura documentada en la auditoría |
-| `identity.py` | Resolución de identidad en cascada, con score |
-| `rules.py` | Detección de riesgo. Sin modelo |
-| `state.py` | Memoria entre corridas + heartbeat |
-| `llm.py` | Redacción y desempate. Con validación de salida |
-| `compose.py` | Agrupación por causa, priorización, render |
-| `main.py` | Orquestación y endpoints |
+| `config.py` | Everything tunable, in one place |
+| `ingest.py` | HTTP with retries. Returns `Fetched`, never a bare list |
+| `normalize.py` | Cleanup of the mess documented in the audit |
+| `identity.py` | Cascading identity resolution, with a score |
+| `rules.py` | Risk detection. No model |
+| `state.py` | Memory between runs + heartbeat |
+| `llm.py` | Drafting and tie-breaking. With output validation |
+| `compose.py` | Grouping by cause, prioritization, rendering |
+| `main.py` | Orchestration and endpoints |
 
 ---
 
-## Dónde trabaja el modelo, y dónde no
+## Where the model works, and where it doesn't
 
-**Sí:**
-- Redacta el titular y el "por qué importa" de cada grupo de riesgos
-- Desempata identidades que la cascada determinística no resolvió
+**Yes:**
+- Drafts the headline and the "why it matters" of each risk group
+- Breaks ties on identities the deterministic cascade didn't resolve
 
 **No:**
-- Aritmética, fechas, ventanas
-- Detección de vacantes
-- Score de severidad
-- Score de confianza (el modelo aporta una señal; el código calcula)
+- Arithmetic, dates, windows
+- Vacancy detection
+- Severity score
+- Confidence score (the model contributes a signal; the code computes it)
 
-El motivo es reproducibilidad. Si el lead pregunta "¿por qué Corvane está primero?",
-tiene que haber una cuenta que mostrar.
+Uses Gemini (`gemini-flash-lite-latest`) via its OpenAI-compatible endpoint.
+The provider is swappable: only `LLM_BASE_URL`, `LLM_MODEL` and the key env var
+change.
+
+The reason for the deterministic cut is reproducibility. If the lead asks "why
+is Corvane first?", there has to be a computation to show.
 
 ### Grounding
 
-El modelo nunca ve datos crudos de la API. Recibe un payload chico y ya verificado,
-devuelve JSON con campos fijos, y el mensaje final lo arma el código: nombres,
-fechas, horas y links los escribe `compose.py`, no el modelo.
+The model never sees raw API data. It receives a small, already-verified payload,
+returns JSON with fixed fields, and the final message is built by the code:
+names, dates, hours and links are written by `compose.py`, not by the model.
 
-### Cómo sé si se rompió
+### How I know if it broke
 
-`llm.validate_output` compara la salida contra el payload y rechaza números o
-entidades que no estaban. Si hay violaciones, se descarta la salida y se usa el
-template determinístico.
+`llm.validate_output` compares the output against the payload and rejects numbers
+or entities that weren't there. If there are violations, the output is discarded
+and the deterministic template is used.
 
-Probado con salidas alucinadas a propósito:
+Tested with deliberately hallucinated outputs:
 
-| Caso | Resultado |
+| Case | Result |
 |---|---|
-| Salida limpia | pasa |
-| Inventa una persona ("Pedro Gomez") | bloquea |
-| Inventa un número (1200 horas) | bloquea |
-| Agrega background falso ("trabaja en Accenture desde 2019") | bloquea |
+| Clean output | passes |
+| Invents a person ("Pedro Gomez") | blocked |
+| Invents a number (1200 hours) | blocked |
+| Adds false background ("works at Accenture since 2019") | blocked |
 
 ---
 
-## Manejo de fallas
+## Failure handling
 
-El stub falla a propósito: `429` (~12,5%) en cualquier endpoint y `500` (~30%) en
+The stub fails on purpose: `429` (~12.5%) on any endpoint and `500` (~30%) on
 `/kantata/time_entries`.
 
-- **429** → se respeta el `Retry-After` del servidor. Adivinar sale más caro.
-- **5xx** → backoff exponencial propio (1s, 2s, 4s). Sin jitter: con un solo
-  cliente no aporta, y agrega ruido al log.
-- **4 intentos** → ~99% de éxito con 30% de falla.
-- **Presupuesto de 120s** por corrida, compartido. Sin esto, tres endpoints en
-  retry simultáneo cuelgan la corrida.
+- **429** -> honor the server's `Retry-After`. Guessing costs more.
+- **5xx** -> our own exponential backoff (1s, 2s, 4s). No jitter: with a single
+  client it adds nothing and only adds log noise.
+- **4 attempts** -> ~99% success at a 30% failure rate.
+- **120s budget** per run, shared. Without it, three endpoints in simultaneous
+  retry hang the run.
 
-### Fuentes críticas vs enriquecedoras
+### Critical vs enriching sources
 
-| Tipo | Colecciones | Si falla |
+| Type | Collections | If it fails |
 |---|---|---|
-| Críticas | `projects`, `allocations`, `time_off`, `users` | El agente **se calla** |
-| Enriquecedoras | `tasks`, `members`, `opportunities`, `time_entries` | Sigue, y marca datos parciales |
+| Critical | `projects`, `allocations`, `time_off`, `users` | The agent **stays silent** |
+| Enriching | `tasks`, `members`, `opportunities`, `time_entries` | Continues, marks partial data |
 
-El recorte del problema esquiva `time_entries`, que es el endpoint más frágil.
-Eso no fue casualidad: la definición de riesgo se eligió sabiendo dónde estaba
-la fragilidad.
+The problem's scope avoids `time_entries`, the most fragile endpoint. That wasn't
+luck: the risk definition was chosen knowing where the fragility was.
 
-### Datos parciales: qué se puede afirmar
+### Partial data: what can be asserted
 
-Regla operativa, con base en la *closed-world assumption* (Reiter, 1978) y en el
-teorema CALM (Hellerstein, 2010):
+Operating rule, grounded in the closed-world assumption (Reiter, 1978) and the
+CALM theorem (Hellerstein, 2010):
 
-- **Afirmaciones positivas** ("Simon está al 130%") salen de datos que sí tenemos.
-  Más datos solo pueden confirmarlas → **seguras con datos parciales**.
-- **Afirmaciones negativas** ("nadie cubre este rol") dependen de datos que no
-  tenemos. Un solo registro faltante las da vuelta → **exigen completitud**.
+- **Positive claims** ("Simon is at 130%") come from data we do have. More data
+  can only confirm them -> **safe with partial data**.
+- **Negative claims** ("nobody covers this role") depend on data we don't have.
+  A single missing record flips them -> **require completeness**.
 
-Con datos incompletos, el agente afirma lo positivo y degrada lo negativo a
-incertidumbre. No pierde el caso en silencio: lo reporta como "no pude evaluar X".
-
----
-
-## Cuándo el agente se calla
-
-- No hay riesgos → no manda nada
-- El riesgo es idéntico a uno ya avisado y tiene menos de 7 días → silencio
-- Una fuente crítica está caída → silencio, y queda registrado en `runs`
-
-El silencio es una decisión, no un default. Por eso existe `/health`: sin
-heartbeat, un agente sano y uno muerto se ven igual.
-
-## Cuándo pregunta en vez de afirmar
-
-Cuando la ambigüedad **cambia la decisión**. Ejemplo real de estos datos:
-R. Vance tiene tareas en ClickUp y no existe en Kantata. Si cubre un rol, no hay
-riesgo; si no, sí lo hay. El agente pregunta en lugar de asumir.
-
-La respuesta se guarda en `resolutions` con confianza 1.0 y no se vuelve a
-preguntar, salvo que pasen 90 días o cambien los datos de esa persona o proyecto.
+With incomplete data, the agent asserts the positive and degrades the negative
+to uncertainty. It doesn't lose the case silently: it reports "couldn't evaluate X".
 
 ---
 
-## Idempotencia
+## When the agent stays silent
 
-Correr el agente dos veces el mismo día no duplica alertas. La tabla
-`alerted_risks` usa la huella del riesgo como clave primaria, con
-`ON CONFLICT DO UPDATE`.
+- No risks -> sends nothing
+- The risk is identical to one already alerted and less than 7 days old -> silence
+- A critical source is down -> silence, recorded in `runs`
+
+Silence is a decision, not a default. That's why `/health` exists: without a
+heartbeat, a healthy agent and a dead one look the same.
+
+## When it asks instead of asserting
+
+When the ambiguity **changes the decision**. Real example from this data:
+R. Vance has tasks in ClickUp and doesn't exist in Kantata. If they cover a role,
+there's no risk; if not, there is. The agent asks instead of assuming.
+
+The answer is saved in `resolutions` with confidence 1.0 and not asked again,
+unless 90 days pass or the data for that person or project changes.
+
+---
+
+## Idempotency
+
+Running the agent twice the same day doesn't duplicate alerts. The `alerted_risks`
+table uses the risk fingerprint as its primary key, with `ON CONFLICT DO UPDATE`.
 
 ---
 
 ## Deploy
 
-`render.yaml` define tres cosas: el web service, un cron semanal (lunes 12:00 UTC)
-y una base Postgres en free tier.
+`render.yaml` defines the web service and a Postgres database on the free tier.
+(The weekly cron was removed because Render no longer offers a free tier for cron
+jobs; the agent is triggered via `POST /run`, and in production the schedule would
+live in EventBridge on AWS.)
 
-Render se eligió por tres razones concretas: cron nativo, Postgres gratis y
-endpoint HTTP en la misma plataforma. En producción esto iría a AWS
-(EventBridge + Lambda/ECS + RDS + Secrets Manager), para vivir donde ya vive el
-resto de la infraestructura en vez de sumar una plataforma más.
+Render was chosen for three concrete reasons: Postgres free tier and an HTTP
+endpoint on the same platform, with minimal build config. In production this would
+go to AWS (EventBridge + Lambda/ECS + RDS + Secrets Manager), to live where the
+rest of the infrastructure already is instead of adding one more platform.
 
-Postgres y no un archivo JSON porque el filesystem de Render es efímero: la
-memoria del agente se borraría en cada redeploy.
+Postgres and not a JSON file because Render's filesystem is ephemeral: the agent's
+memory would be wiped on every redeploy.

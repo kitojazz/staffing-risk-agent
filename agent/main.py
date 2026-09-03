@@ -1,8 +1,8 @@
-"""Punto de entrada. El cron y el endpoint HTTP llaman a la MISMA función,
-así no hay dos comportamientos que puedan divergir.
+"""Entry point. The cron and the HTTP endpoint call the SAME function, so
+there can't be two behaviors that drift apart.
 
-    POST /run      fuerza una corrida (esto es lo que dispara Go Nimbly)
-    GET  /health   heartbeat: última corrida exitosa
+    POST /run      forces a run (this is what Go Nimbly triggers)
+    GET  /health   heartbeat: last successful run
 """
 
 import logging
@@ -28,12 +28,12 @@ def _store() -> Store:
 
 
 def _dates(rows: list[dict], *fields: str) -> list[dict]:
-    """Parsea las fechas de una colección. Los tres sistemas usan formatos distintos."""
+    """Parse the dates of a collection. The three systems use different formats."""
     return [{**row, **{f: parse_date(row.get(f)) for f in fields}} for row in rows]
 
 
 def run_once(today: date | None = None) -> dict:
-    """Una corrida completa del pipeline. Devuelve el resumen."""
+    """One full pipeline run. Returns the summary."""
     today = today or datetime.now(timezone.utc).date()
     store = _store()
     store.migrate()
@@ -43,7 +43,7 @@ def run_once(today: date | None = None) -> dict:
     client = ApiClient(config.API_BASE_URL, config.CANDIDATE_TOKEN, deadline)
 
     try:
-        # --- 1. Ingesta ---
+        # --- 1. Ingestion ---
         fetched: dict[str, Fetched] = {
             "users": client.fetch_collection("users", "/kantata/users", "users"),
             "projects": client.fetch_collection("projects", "/kantata/projects", "projects"),
@@ -56,21 +56,22 @@ def run_once(today: date | None = None) -> dict:
     finally:
         client.close()
 
-    # --- 2. ¿Podemos decidir algo? ---
-    # Si falta una fuente crítica, el agente se calla. Alertar con datos
-    # incompletos produce falsos positivos, y un falso positivo quema el canal.
+    # --- 2. Can we decide anything? ---
+    # If a critical source is missing, the agent stays silent. Alerting on
+    # incomplete data produces false positives, and a false positive burns
+    # the channel.
     broken = [name for name in config.CRITICAL_SOURCES if not fetched[name].ok]
     if broken:
         detail = {"skipped": True, "broken_sources": broken}
         store.finish_run(run_id, "degraded", detail)
-        _heartbeat_ok()   # el agente corrió: está vivo. La API caída va por otro canal.
-        log.error("fuentes críticas caídas, no alerto: %s", broken)
-        return {"sent": False, "reason": f"fuentes críticas caídas: {broken}"}
+        _heartbeat_ok()   # the agent ran: it's alive. The broken API goes on another channel.
+        log.error("critical sources down, not alerting: %s", broken)
+        return {"sent": False, "reason": f"critical sources down: {broken}"}
 
     complete = all(f.complete for f in fetched.values())
-    notes = [f"{f.name} incompleto" for f in fetched.values() if not f.complete]
+    notes = [f"{f.name} incomplete" for f in fetched.values() if not f.complete]
 
-    # --- 3. Normalización ---
+    # --- 3. Normalization ---
     projects = _dates(fetched["projects"].records, "start_date", "due_date")
     allocations = normalize_allocations(
         fetched["allocations"].records, {p["id"] for p in projects}
@@ -78,7 +79,7 @@ def run_once(today: date | None = None) -> dict:
     allocations.records = _dates(allocations.records, "start_date", "end_date")
     time_off = _dates(fetched["time_off"].records, "start_date", "end_date")
 
-    # --- 4. Identidad ---
+    # --- 4. Identity ---
     resolution = identity.resolve(
         fetched["users"].records,
         fetched["members"].records,
@@ -87,15 +88,15 @@ def run_once(today: date | None = None) -> dict:
     )
     identities = {i.kantata_id: i for i in resolution.identities}
 
-    # --- 5. Reglas (determinístico) ---
+    # --- 5. Rules (deterministic) ---
     risks = detect_vacant_lead(projects, today, config.WINDOW_DAYS, complete)
     risks += detect_leave_without_backup(
         projects, allocations.records, time_off, identities, today, config.WINDOW_DAYS, complete
     )
 
-    # --- 6. Memoria: ¿qué de esto es nuevo? ---
+    # --- 6. Memory: what of this is new? ---
     fresh = []
-    decisions = {"nuevo": 0, "cambio": 0, "recordatorio": 0, "silencio": 0}
+    decisions = {"new": 0, "changed": 0, "reminder": 0, "silence": 0}
     for risk in risks:
         payload = {"headline": risk.headline, "days": risk.days_until_impact}
         decision = store.decide(risk.fingerprint, payload)
@@ -104,9 +105,9 @@ def run_once(today: date | None = None) -> dict:
             fresh.append(risk)
             store.record_alert(risk.fingerprint, risk.project_id, risk.kind, payload)
         else:
-            log.info("silencio para %s (%s)", risk.fingerprint, decision.reason)
+            log.info("silence for %s (%s)", risk.fingerprint, decision.reason)
 
-    # --- 7. Redacción y salida ---
+    # --- 7. Drafting and output ---
     groups = compose.group_by_cause(fresh)
     message = compose.render(groups, notes)
 
@@ -132,29 +133,29 @@ def run_once(today: date | None = None) -> dict:
 
 
 def _heartbeat_ok() -> None:
-    """Avisa al dead man's switch que la corrida terminó bien.
+    """Tell the dead man's switch the run finished fine.
 
-    Solo se llama tras un run exitoso. Si el agente muere antes, el ping
-    no sale y el servicio externo dispara la alerta por ausencia.
+    Called only after the agent ran. If the agent dies earlier, the ping
+    never goes out and the external service alerts on absence.
     """
     if not config.HEARTBEAT_URL:
         return
     try:
         httpx.get(config.HEARTBEAT_URL, timeout=10.0)
     except httpx.HTTPError as exc:
-        log.warning("no pude pinguear el heartbeat: %s", exc)
+        log.warning("could not ping heartbeat: %s", exc)
 
 
 def _deliver(text: str) -> None:
-    """Webhook si hay URL configurada; si no, al log. El brief acepta las dos."""
+    """Webhook if a URL is configured; otherwise to the log. The brief accepts both."""
     if not config.SLACK_WEBHOOK_URL:
-        log.info("SLACK (sin webhook configurado):\n%s", text)
+        log.info("SLACK (no webhook configured):\n%s", text)
         return
     try:
         httpx.post(config.SLACK_WEBHOOK_URL, json={"text": text}, timeout=10.0)
     except httpx.HTTPError as exc:
-        log.error("no pude postear a Slack: %s", exc)
-        log.info("SLACK (fallback a log):\n%s", text)
+        log.error("could not post to Slack: %s", exc)
+        log.info("SLACK (fallback to log):\n%s", text)
 
 
 @app.get("/")
@@ -174,7 +175,7 @@ def trigger_run():
 @app.get("/health")
 def health():
     store = _store()
-    store.migrate()   # idempotente: crea las tablas si es la primera vez
+    store.migrate()   # idempotent: creates tables on first run
     last = store.last_successful_run()
     return {"status": "ok", "last_successful_run": last}
 

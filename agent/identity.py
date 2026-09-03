@@ -1,16 +1,16 @@
-"""Resolución de identidad: ¿quién es quién entre los tres sistemas?
+"""Identity resolution: who is who across the three systems?
 
-No hay clave compartida. La cascada va de lo más confiable a lo más dudoso:
+There is no shared key. The cascade goes from most reliable to least:
 
-  1.00  email exacto
-  0.90  nombre normalizado, y SOLO si es inequívoco
-  0.85  señales estructurales (mismo proyecto, mismo rol, mismas fechas)
-  0.50  el LLM propone (opinión, no veredicto)
-  0.00  sin resolver
+  1.00  exact email
+  0.90  normalized name, and ONLY if unambiguous
+  0.85  structural signals (same project, same role, same dates)
+  0.50  the LLM proposes (opinion, not verdict)
+  0.00  unresolved
 
-Trampa A1: hay dos personas distintas que se llaman "Ines Rocha".
-Por eso el tier de nombre exige unicidad: si un nombre normalizado apunta
-a más de una persona, el nombre no sirve como evidencia.
+Trap A1: there are two distinct people named "Ines Rocha".
+That's why the name tier requires uniqueness: if a normalized name points
+to more than one person, the name can't serve as evidence.
 """
 
 import logging
@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Identity:
-    """Una persona, con sus caras en cada sistema."""
+    """A person, with their faces in each system."""
 
     kantata_id: str
     full_name: str
@@ -46,7 +46,7 @@ class Resolution:
 
 
 def _by_email(records: list[dict], key: str) -> dict[str, dict]:
-    """Indexa por email en minúsculas. Ignora los que no tienen."""
+    """Index by lowercased email. Skip those without one."""
     index = {}
     for row in records:
         email = (row.get(key) or "").strip().lower()
@@ -56,10 +56,10 @@ def _by_email(records: list[dict], key: str) -> dict[str, dict]:
 
 
 def _unambiguous_names(records: list[dict], key: str) -> dict[str, dict]:
-    """Indexa por nombre normalizado, PERO descarta los nombres repetidos.
+    """Index by normalized name, BUT drop repeated names.
 
-    Si dos registros normalizan al mismo nombre, ese nombre queda fuera
-    del índice: no puede servir de evidencia para nadie.
+    If two records normalize to the same name, that name is left out of the
+    index: it can't serve as evidence for anyone.
     """
     buckets: dict[str, list[dict]] = defaultdict(list)
     for row in records:
@@ -72,7 +72,7 @@ def _unambiguous_names(records: list[dict], key: str) -> dict[str, dict]:
         if len(rows) == 1:
             unique[name] = rows[0]
         else:
-            log.info("nombre ambiguo, descartado del índice: %r (%d registros)", name, len(rows))
+            log.info("ambiguous name, dropped from index: %r (%d records)", name, len(rows))
     return unique
 
 
@@ -82,10 +82,10 @@ def resolve(
     salesforce_users: list[dict],
     confirmations: dict[str, str] | None = None,
 ) -> Resolution:
-    """Construye la lista de identidades unificadas.
+    """Build the list of unified identities.
 
-    `confirmations` son respuestas humanas previas ({clave_externa: kantata_id}).
-    Una confirmación humana pisa cualquier cálculo y vale 1.0.
+    `confirmations` are prior human answers ({external_key: kantata_id}).
+    A human confirmation overrides any calculation and is worth 1.0.
     """
     confirmations = confirmations or {}
     result = Resolution()
@@ -111,17 +111,17 @@ def resolve(
         member = clickup_by_email.get(email)
         if member:
             identity.clickup_id = member["id"]
-            identity.evidence.append(f"clickup por email ({email})")
+            identity.evidence.append(f"clickup by email ({email})")
         else:
             member = clickup_by_name.get(normalize_name(user.get("full_name")))
             if member:
                 identity.clickup_id = member["id"]
                 identity.confidence = min(identity.confidence, 0.9)
-                identity.method = "nombre_inequivoco"
-                identity.evidence.append(f"clickup por nombre único ({member['username']})")
+                identity.method = "unambiguous_name"
+                identity.evidence.append(f"clickup by unique name ({member['username']})")
             else:
                 identity.confidence = min(identity.confidence, 0.5)
-                identity.method = "sin_match_clickup"
+                identity.method = "no_clickup_match"
 
         if identity.clickup_id is not None:
             matched_clickup.add(identity.clickup_id)
@@ -134,20 +134,20 @@ def resolve(
 
         result.identities.append(identity)
 
-    # --- Gente que existe en ClickUp y no en Kantata (trampa A3) ---
+    # --- People that exist in ClickUp but not in Kantata (trap A3) ---
     for member in clickup_members:
         if member["id"] in matched_clickup:
             continue
 
         key = f"clickup:{member['id']}"
         if key in confirmations:
-            # El lead ya respondió por esta persona. Vale 1.0.
+            # The lead already answered about this person. Worth 1.0.
             continue
 
         result.unresolved.append(member)
         result.questions.append(
-            f"{member['username']} ({member.get('email', 'sin email')}) tiene tareas "
-            f"en ClickUp pero no figura en Kantata. ¿Cubre algún rol asignado?"
+            f"{member['username']} ({member.get('email', 'no email')}) has tasks "
+            f"in ClickUp but is not in Kantata. Do they cover an assigned role?"
         )
 
     return result
