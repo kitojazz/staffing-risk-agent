@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 LLM_BASE_URL = os.environ.get(
     "LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
 )
-MODEL = os.environ.get("LLM_MODEL", "gemini-3.6-flash")
+MODEL = os.environ.get("LLM_MODEL", "gemini-flash-lite-latest")
 API_KEY_ENV = os.environ.get("LLM_API_KEY_ENV", "GEMINI_API_KEY")
 
 TEMPERATURE = 0.0
@@ -56,7 +56,7 @@ class LLMUnavailable(Exception):
     """El modelo no respondio. El agente sigue con el template deterministico."""
 
 
-def _call(payload: dict, system: str = SYSTEM_PROMPT, timeout: float = 45.0) -> dict:
+def _call(payload: dict, system: str = SYSTEM_PROMPT, timeout: float = 90.0) -> dict:
     api_key = os.environ.get(API_KEY_ENV)
     if not api_key:
         raise LLMUnavailable(f"falta {API_KEY_ENV}")
