@@ -12,24 +12,7 @@ services:
         sync: false
       - key: SLACK_WEBHOOK_URL
         sync: false
-      - key: DATABASE_URL
-        fromDatabase:
-          name: staffing-agent-db
-          property: connectionString
-
-  - type: cron
-    name: staffing-risk-agent-weekly
-    runtime: python
-    plan: free
-    schedule: "0 12 * * 1"
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m agent.main
-    envVars:
-      - key: API_BASE_URL
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: SLACK_WEBHOOK_URL
+      - key: HEARTBEAT_URL
         sync: false
       - key: DATABASE_URL
         fromDatabase:
@@ -39,3 +22,7 @@ services:
 databases:
   - name: staffing-agent-db
     plan: free
+
+# NOTA: el cron semanal se removió porque Render ya no ofrece free tier para
+# cron jobs. El agente se gatilla vía POST /run (suficiente para la evaluación).
+# En producción el schedule iría en EventBridge (AWS), como dice el decision log.
