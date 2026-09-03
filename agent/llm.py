@@ -56,7 +56,7 @@ class LLMUnavailable(Exception):
     """El modelo no respondio. El agente sigue con el template deterministico."""
 
 
-def _call(payload: dict, system: str = SYSTEM_PROMPT, timeout: float = 20.0) -> dict:
+def _call(payload: dict, system: str = SYSTEM_PROMPT, timeout: float = 45.0) -> dict:
     api_key = os.environ.get(API_KEY_ENV)
     if not api_key:
         raise LLMUnavailable(f"falta {API_KEY_ENV}")
@@ -64,6 +64,7 @@ def _call(payload: dict, system: str = SYSTEM_PROMPT, timeout: float = 20.0) -> 
     body = {
         "model": MODEL,
         "temperature": TEMPERATURE,
+        "reasoning_effort": "none",   # redactar una alerta corta no necesita thinking; más rápido y barato
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
