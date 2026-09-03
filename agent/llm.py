@@ -64,7 +64,6 @@ def _call(payload: dict, system: str = SYSTEM_PROMPT, timeout: float = 45.0) -> 
     body = {
         "model": MODEL,
         "temperature": TEMPERATURE,
-        "reasoning_effort": "none",   # redactar una alerta corta no necesita thinking; más rápido y barato
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
